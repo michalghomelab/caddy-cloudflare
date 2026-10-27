@@ -32,6 +32,8 @@ jobs:
         run: |
           caddy=$(gh release view -R caddyserver/caddy --json tagName -q .tagName)
           cloudflare=$(curl -fsSL https://proxy.golang.org/github.com/caddy-dns/cloudflare/@latest | jq -r .Version)
+          semver='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          [[ $caddy =~ $semver && $cloudflare =~ $semver ]] || { echo "Unexpected versions: '$caddy' '$cloudflare'"; exit 1; }
           echo "CADDY_VERSION=${caddy#v}" >> "$GITHUB_ENV"
           echo "CLOUDFLARE_VERSION=$cloudflare" >> "$GITHUB_ENV"
           echo "BUILD_TAG=${caddy#v}-cloudflare-${cloudflare#v}" >> "$GITHUB_ENV"
