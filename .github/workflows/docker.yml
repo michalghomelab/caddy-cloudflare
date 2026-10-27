@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   schedule:
-    # Every 3 h: check for a new Caddy release
+    # Every 3 h: check for a new Caddy or cloudflare module release
     - cron: "0 */3 * * *"
     # Weekly: rebuild regardless of version (Alpine patches)
     - cron: "0 4 * * 1"
@@ -24,13 +24,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Latest stable Caddy release, e.g. 2.11.7
-      - name: Resolve Caddy version
+      # Latest stable Caddy release (e.g. 2.11.7) and the latest tagged
+      # cloudflare module as the Go proxy resolves it (e.g. v0.2.4)
+      - name: Resolve versions
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version=$(gh release view -R caddyserver/caddy --json tagName -q .tagName)
-          echo "CADDY_VERSION=${version#v}" >> "$GITHUB_ENV"
+          caddy=$(gh release view -R caddyserver/caddy --json tagName -q .tagName)
+          cloudflare=$(curl -fsSL https://proxy.golang.org/github.com/caddy-dns/cloudflare/@latest | jq -r .Version)
+          echo "CADDY_VERSION=${caddy#v}" >> "$GITHUB_ENV"
+          echo "CLOUDFLARE_VERSION=$cloudflare" >> "$GITHUB_ENV"
+          echo "BUILD_TAG=${caddy#v}-cloudflare-${cloudflare#v}" >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@v4
 
@@ -40,12 +44,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # On the 3-hourly check, build only a new version, and only once Docker Hub
-      # has its builder image (it shows up with a delay).
+      # On the 3-hourly check, build only when Caddy or the module has a new
+      # version, and only once Docker Hub has the builder image (it shows up
+      # with a delay).
       - name: Check for new release
         id: check
         run: |
-          image=ghcr.io/${{ github.repository }}:$CADDY_VERSION
+          image=ghcr.io/${{ github.repository }}:$BUILD_TAG
           if [ "${{ github.event.schedule }}" != "0 */3 * * *" ]; then
             echo "build=true" >> "$GITHUB_OUTPUT"
           elif docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
@@ -63,6 +68,7 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
+            type=raw,value=${{ env.BUILD_TAG }}
             type=raw,value=${{ env.CADDY_VERSION }}
             type=raw,value=latest
 
@@ -71,7 +77,9 @@ jobs:
         with:
           context: .
           platforms: linux/amd64
-          build-args: CADDY_VERSION=${{ env.CADDY_VERSION }}
+          build-args: |
+            CADDY_VERSION=${{ env.CADDY_VERSION }}
+            CLOUDFLARE_VERSION=${{ env.CLOUDFLARE_VERSION }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
