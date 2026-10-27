@@ -1,0 +1,84 @@
+name: build-and-push
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Every 3 h: check for a new Caddy release
+    - cron: "0 */3 * * *"
+    # Weekly: rebuild regardless of version (Alpine patches)
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  actions: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Latest stable Caddy release, e.g. 2.11.7
+      - name: Resolve Caddy version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(gh release view -R caddyserver/caddy --json tagName -q .tagName)
+          echo "CADDY_VERSION=${version#v}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # On the 3-hourly check, build only a new version, and only once Docker Hub
+      # has its builder image (it shows up with a delay).
+      - name: Check for new release
+        id: check
+        run: |
+          image=ghcr.io/${{ github.repository }}:$CADDY_VERSION
+          if [ "${{ github.event.schedule }}" != "0 */3 * * *" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          elif docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
+            echo "$image already exists"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          elif ! docker buildx imagetools inspect "caddy:$CADDY_VERSION-builder-alpine" >/dev/null 2>&1; then
+            echo "Docker Hub has no caddy:$CADDY_VERSION-builder-alpine yet"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ env.CADDY_VERSION }}
+            type=raw,value=latest
+
+      - if: steps.check.outputs.build == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: CADDY_VERSION=${{ env.CADDY_VERSION }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      # GitHub disables cron in a public repo after 60 days without commits
+      # (that is how upstream zydou/gfw died); enabling the workflow resets the timer.
+      - name: Keep schedule alive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow enable docker.yml -R ${{ github.repository }}
